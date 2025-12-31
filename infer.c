@@ -16,7 +16,7 @@ static char model[MAX_VAL];
 
 static const char *SYSTEM_PROMPT = 
     "You are a CLI tool. Output plain text only. No yapping. Keep the output concise. "
-    "DO NOT USE MARKDOWNS. NO asterisks. NO backticks. NO formatting. NO \\n literals "
+    "DO NOT USE MARKDOWNS. NO asterisks. NO backticks. NO formatting. "
     "Just plain readable sentences.";
 
 
@@ -162,7 +162,6 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
 }
 
 /* ---------------- MAIN ---------------- */
-
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "Usage: %s \"prompt\"\n", argv[0]); return 1; }
 
@@ -173,7 +172,6 @@ int main(int argc, char **argv) {
 
     if (!env_url || !*env_url) {
         fprintf(stderr, "Error: INFER_API_URL environment variable not set.\n");
-        fprintf(stderr, "Please set INFER_API_URL, INFER_API_KEY, and INFER_MODEL.\n");
         return 1;
     }
 
@@ -183,25 +181,55 @@ int main(int argc, char **argv) {
 
     // 1. Prepare Inputs
     char *pipe_in = read_stdin();
-    char *safe_prompt = json_escape(argv[1]);
-    char *safe_pipe = json_escape(pipe_in);
+
+    size_t prompt_len = 0;
+    for (int i = 1; i < argc; i++) prompt_len += strlen(argv[i]) + 1;
+    
+    char *prompt = malloc(prompt_len + 1);
+    prompt[0] = '\0';
+    for (int i = 1; i < argc; i++) {
+        strcat(prompt, argv[i]);
+        if (i < argc - 1) strcat(prompt, " ");
+    }
+
+    char *safe_prompt = json_escape(prompt);
+    char *safe_pipe = pipe_in ? json_escape(pipe_in) : NULL;
     
     // 2. Build Payload
-    char *payload_fmt = 
-        "{"
-        "\"model\":\"%s\","
-        "\"stream\":false,"
-        "\"messages\":["
-          "{\"role\":\"system\",\"content\":\"%s\"},"
-          "{\"role\":\"user\",\"content\":\"%s\\n\\nContext:\\n%s\"}"
-        "]"
-        "}";
+    char *payload = NULL;
+    
+    // Only add "Context:" if we actually have piped input ---
+    if (safe_pipe && *safe_pipe) {
+        char *payload_fmt = 
+            "{"
+            "\"model\":\"%s\","
+            "\"stream\":false,"
+            "\"messages\":["
+              "{\"role\":\"system\",\"content\":\"%s\"},"
+              "{\"role\":\"user\",\"content\":\"%s\\n\\nContext:\\n%s\"}"
+            "]"
+            "}";
+            
+        size_t plen = strlen(payload_fmt) + strlen(model) + strlen(SYSTEM_PROMPT) + 
+                      strlen(safe_prompt) + strlen(safe_pipe) + 100;
+        payload = malloc(plen);
+        snprintf(payload, plen, payload_fmt, model, SYSTEM_PROMPT, safe_prompt, safe_pipe);
+    } else {
+        char *payload_fmt = 
+            "{"
+            "\"model\":\"%s\","
+            "\"stream\":false,"
+            "\"messages\":["
+              "{\"role\":\"system\",\"content\":\"%s\"},"
+              "{\"role\":\"user\",\"content\":\"%s\"}"
+            "]"
+            "}";
 
-    // Allocate exact size needed
-    size_t plen = strlen(payload_fmt) + strlen(model) + strlen(SYSTEM_PROMPT) + 
-                  strlen(safe_prompt) + strlen(safe_pipe?safe_pipe:"") + 100;
-    char *payload = malloc(plen);
-    snprintf(payload, plen, payload_fmt, model, SYSTEM_PROMPT, safe_prompt, safe_pipe?safe_pipe:"");
+        size_t plen = strlen(payload_fmt) + strlen(model) + strlen(SYSTEM_PROMPT) + 
+                      strlen(safe_prompt) + 100;
+        payload = malloc(plen);
+        snprintf(payload, plen, payload_fmt, model, SYSTEM_PROMPT, safe_prompt);
+    }
 
     // 3. Setup Curl
     struct response chunk = {0};
@@ -224,20 +252,19 @@ int main(int argc, char **argv) {
     // 5. Parse JSON Response
     if (res == CURLE_OK && chunk.data) {
         jsmn_parser p;
-        jsmntok_t tok[1024]; // Assuming response isn't massively complex
+        jsmntok_t tok[1024]; 
         jsmn_init(&p);
         int r = jsmn_parse(&p, chunk.data, chunk.size, tok, 1024);
 
-        // Simple scan for "content" key
         for (int i = 1; i < r; i++) {
             if (tok[i].type == JSMN_STRING && 
                 strncmp(chunk.data + tok[i].start, "content", 7) == 0) {
                 
-                // Print the value immediately following "content"
                 jsmntok_t val = tok[i+1];
+                // Use your new helper here
                 print_json_string_unescaped(chunk.data + val.start, val.end - val.start);
                 fputc('\n', stdout);
-                break; // Found it, exit
+                break; 
             }
         }
     } else {
@@ -245,7 +272,8 @@ int main(int argc, char **argv) {
     }
 
     // Cleanup
-    free(pipe_in); free(safe_prompt); free(safe_pipe); free(payload); free(chunk.data);
+    free(pipe_in); free(safe_prompt); if(safe_pipe) free(safe_pipe); free(payload); free(chunk.data);
+    free(prompt);
     curl_easy_cleanup(c);
     return 0;
 }
